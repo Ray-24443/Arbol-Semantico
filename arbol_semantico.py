@@ -1,4 +1,3 @@
-
 import re
 import tkinter as tk
 from tkinter import messagebox, scrolledtext
@@ -10,11 +9,11 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 
 # ============================================================
-# 1. UTILIDADES PARA LEER PROPOSICIONES EN ESPAÑOL
+# 1. UTILIDADES
 # ============================================================
 
 def normalizar(texto):
-    """Convierte a minusculas y elimina acentos."""
+    """Pasa a minusculas y elimina acentos."""
     texto = texto.lower().strip()
     return "".join(
         c for c in unicodedata.normalize("NFD", texto)
@@ -23,11 +22,12 @@ def normalizar(texto):
 
 
 def quitar_bordes(texto):
+    """Elimina parentesis exteriores que cubren toda la formula."""
     texto = texto.strip()
 
-    while len(texto) >= 2 and texto[0] == "(" and texto[-1] == ")":
+    while texto.startswith("(") and texto.endswith(")"):
         nivel = 0
-        cubre_todo = True
+        valido = True
 
         for i, c in enumerate(texto):
             if c == "(":
@@ -35,59 +35,60 @@ def quitar_bordes(texto):
             elif c == ")":
                 nivel -= 1
 
-                if nivel == 0 and i != len(texto) - 1:
-                    cubre_todo = False
-                    break
+            if nivel == 0 and i < len(texto) - 1:
+                valido = False
+                break
 
-        if cubre_todo:
-            texto = texto[1:-1].strip()
-        else:
+        if not valido:
             break
+
+        texto = texto[1:-1].strip()
 
     return texto
 
 
-def buscar_conector(texto, conectores):
-    """Busca conectores logicos fuera de parentesis."""
-    original = texto
-    norm = normalizar(original)
+def dividir(texto, patrones):
+    """
+    Busca el primer conector fuera de parentesis.
+    Devuelve las partes izquierda y derecha.
+    """
+    norm = normalizar(texto)
     nivel = 0
     i = 0
 
-    while i < len(original):
-        if original[i] == "(":
+    while i < len(norm):
+        if norm[i] == "(":
             nivel += 1
             i += 1
             continue
 
-        if original[i] == ")":
+        if norm[i] == ")":
             nivel -= 1
             i += 1
             continue
 
         if nivel == 0:
-            for conector in conectores:
-                cn = normalizar(conector)
+            for patron in patrones:
+                coincidencia = re.match(patron, norm[i:])
 
-                if norm[i:i + len(cn)] == cn:
-                    antes_ok = (
-                        i == 0 or not norm[i - 1].isalnum()
-                    )
+                if coincidencia:
+                    # Los patrones empiezan y terminan
+                    # en espacios para separar palabras.
+                    longitud = coincidencia.end()
+                    izquierda = texto[:i]
+                    derecha = texto[i + longitud:]
 
-                    despues = i + len(cn)
-
-                    despues_ok = (
-                        despues >= len(norm)
-                        or not norm[despues].isalnum()
-                    )
-
-                    if antes_ok and despues_ok:
-                        return i, original[i:i + len(cn)]
+                    if izquierda.strip() and derecha.strip():
+                        return izquierda.strip(), derecha.strip()
 
         i += 1
 
     return None
 
+
+# ============================================================
+# 2. FORMULAS LOGICAS
+# ============================================================
 
 @dataclass(frozen=True)
 class Formula:
@@ -95,346 +96,326 @@ class Formula:
     izquierda: object = None
     derecha: object = None
     nombre: str = ""
+    original: str = field(default="", compare=False, hash=False)
 
 
 def parsear(texto):
-    """Convierte una proposicion escrita en una formula logica."""
+    """Convierte texto en español a una formula logica."""
 
     texto = quitar_bordes(texto.strip().rstrip(".;"))
 
     if not texto:
-        raise ValueError("Hay una proposicion vacia.")
+        raise ValueError("Se encontro una proposicion vacia.")
 
     norm = normalizar(texto)
 
     # Condicional: Si A, entonces B
     m = re.match(
         r"^\s*si\s+(.+?),?\s+entonces\s+(.+)\s*$",
-        texto,
-        flags=re.IGNORECASE
+        norm
     )
 
     if m:
+        # Los acentos no alteran las posiciones en el texto habitual.
+        a, b = m.span(1), m.span(2)
         return Formula(
             "implica",
-            parsear(m.group(1)),
-            parsear(m.group(2))
+            parsear(texto[a[0]:a[1]]),
+            parsear(texto[b[0]:b[1]])
         )
 
     # Bicondicional
-    encontrado = buscar_conector(
-        texto, [" si y solo si ", " sii "]
+    partes = dividir(
+        texto,
+        [r"\s+si y solo si\s+", r"\s+sii\s+", r"\s+↔\s+"]
     )
-
-    if encontrado:
-        pos, con = encontrado
-        return Formula(
-            "bicond",
-            parsear(texto[:pos]),
-            parsear(texto[pos + len(con):])
-        )
+    if partes:
+        return Formula("bicond", parsear(partes[0]), parsear(partes[1]))
 
     # Implicacion
-    encontrado = buscar_conector(texto, [" implica "])
-
-    if encontrado:
-        pos, con = encontrado
-        return Formula(
-            "implica",
-            parsear(texto[:pos]),
-            parsear(texto[pos + len(con):])
-        )
+    partes = dividir(
+        texto,
+        [r"\s+implica\s+", r"\s+→\s+"]
+    )
+    if partes:
+        return Formula("implica", parsear(partes[0]), parsear(partes[1]))
 
     # Disyuncion
-    encontrado = buscar_conector(texto, [" o ", " u "])
-
-    if encontrado:
-        pos, con = encontrado
-        return Formula(
-            "or",
-            parsear(texto[:pos]),
-            parsear(texto[pos + len(con):])
-        )
+    partes = dividir(
+        texto,
+        [r"\s+o\s+", r"\s+u\s+", r"\s+∨\s+"]
+    )
+    if partes:
+        return Formula("or", parsear(partes[0]), parsear(partes[1]))
 
     # Conjuncion
-    encontrado = buscar_conector(
-        texto, [" y ", " pero ", " aunque "]
+    partes = dividir(
+        texto,
+        [
+            r"\s+y\s+",
+            r"\s+pero\s+",
+            r"\s+aunque\s+",
+            r"\s+∧\s+"
+        ]
     )
-
-    if encontrado:
-        pos, con = encontrado
-        return Formula(
-            "and",
-            parsear(texto[:pos]),
-            parsear(texto[pos + len(con):])
-        )
+    if partes:
+        return Formula("and", parsear(partes[0]), parsear(partes[1]))
 
     # Negacion
     if norm.startswith("no "):
-        return Formula("not", parsear(texto[3:]))
+        return Formula("not", izquierda=parsear(texto[3:]))
 
-    if norm.startswith("es falso que "):
+    prefijo = "es falso que "
+    if norm.startswith(prefijo):
         return Formula(
             "not",
-            parsear(texto[len("es falso que "):])
+            izquierda=parsear(texto[len(prefijo):])
         )
 
     if texto.startswith("¬"):
-        return Formula("not", parsear(texto[1:]))
+        return Formula("not", izquierda=parsear(texto[1:]))
 
-    # Simbolos logicos
-    for simbolo, tipo in [
-        ("→", "implica"),
-        ("∧", "and"),
-        ("∨", "or"),
-        ("↔", "bicond")
-    ]:
-        if simbolo in texto:
-            pos = texto.find(simbolo)
-            return Formula(
-                tipo,
-                parsear(texto[:pos]),
-                parsear(texto[pos + 1:])
-            )
-
-    # Proposicion simple
-    return Formula("atom", nombre=texto.strip())
+    # Proposicion atomica
+    return Formula(
+        "atom",
+        nombre=normalizar(texto),
+        original=texto.strip()
+    )
 
 
-def imprimir_formula(f):
-    if f.tipo == "atom":
-        return f.nombre
+def recoger_atomos(formula, resultado):
+    """Guarda las proposiciones atomicas sin duplicarlas."""
+    if formula.tipo == "atom":
+        resultado.setdefault(formula.nombre, formula.original)
+        return
 
-    if f.tipo == "not":
-        hijo = imprimir_formula(f.izquierda)
+    recoger_atomos(formula.izquierda, resultado)
 
-        if f.izquierda.tipo == "atom":
-            return "¬" + hijo
+    if formula.derecha is not None:
+        recoger_atomos(formula.derecha, resultado)
 
-        return "¬(" + hijo + ")"
 
-    simbolos = {
+def imprimir_formula(formula, simbolos):
+    """Convierte una formula a notacion simbolica."""
+
+    if formula.tipo == "atom":
+        return simbolos[formula.nombre]
+
+    if formula.tipo == "not":
+        hijo = formula.izquierda
+        texto = imprimir_formula(hijo, simbolos)
+
+        if hijo.tipo == "atom" or hijo.tipo == "not":
+            return "¬" + texto
+
+        return "¬(" + texto + ")"
+
+    operadores = {
         "and": "∧",
         "or": "∨",
         "implica": "→",
         "bicond": "↔"
     }
 
-    return (
-        "("
-        + imprimir_formula(f.izquierda)
-        + " "
-        + simbolos[f.tipo]
-        + " "
-        + imprimir_formula(f.derecha)
-        + ")"
-    )
+    a = imprimir_formula(formula.izquierda, simbolos)
+    b = imprimir_formula(formula.derecha, simbolos)
+
+    return f"({a} {operadores[formula.tipo]} {b})"
 
 
 # ============================================================
-# 2. CONSTRUCCION DEL ARBOL SEMANTICO
+# 3. TABLEAU SEMANTICO
 # ============================================================
-
-@dataclass
-class Entrada:
-    formula: Formula
-    verdad: bool
-    aplicada: bool = False
-
 
 @dataclass
 class Rama:
+    # Cada elemento contiene (formula, valor de verdad).
     entradas: list = field(default_factory=list)
+    aplicadas: set = field(default_factory=set)
     estado: str = "abierta"
     motivo: str = ""
 
 
-def atomos_opuestos(rama):
-    """Detecta contradicciones entre atomos y sus negaciones."""
+def clave(formula, verdad):
+    """Identifica una formula con su valor de verdad."""
+    return formula, verdad
 
-    vistos = {}
 
-    for entrada in rama.entradas:
-        f = entrada.formula
+def agregar(rama, formula, verdad):
+    """Evita repetir una formula con el mismo valor."""
+    elemento = clave(formula, verdad)
 
-        if f.tipo == "atom":
-            nombre = f.nombre
-            valor = entrada.verdad
+    if elemento not in rama.entradas:
+        rama.entradas.append(elemento)
 
-        elif f.tipo == "not" and f.izquierda.tipo == "atom":
-            nombre = f.izquierda.nombre
-            valor = not entrada.verdad
+
+def comprobar_contradiccion(rama):
+    """
+    Detecta p y no p en una misma rama.
+    Tambien reconoce la negacion de un atomo.
+    """
+    valores = {}
+
+    for formula, verdad in rama.entradas:
+        if formula.tipo == "atom":
+            nombre = formula.nombre
+            valor = verdad
+
+        elif (
+            formula.tipo == "not"
+            and formula.izquierda.tipo == "atom"
+        ):
+            nombre = formula.izquierda.nombre
+            valor = not verdad
 
         else:
             continue
 
-        if nombre in vistos and vistos[nombre] != valor:
-            return True, f"Contradiccion: {nombre} y ¬{nombre}"
+        if nombre in valores and valores[nombre] != valor:
+            return True, f"Contradiccion en {nombre}"
 
-        vistos[nombre] = valor
+        valores[nombre] = valor
 
     return False, ""
 
 
-def expandir_entrada(entrada):
+def expandir(formula, verdad):
     """
-    Aplica las reglas del tableau semantico.
+    Reglas correctas de expansion del tableau.
 
-    Cada elemento de la lista representa una alternativa.
-    Las alternativas diferentes generan ramas diferentes.
+    Cada lista interna agrega formulas a una misma rama.
+    Listas diferentes generan ramas alternativas.
     """
+    tipo = formula.tipo
+    a = formula.izquierda
+    b = formula.derecha
 
-    f = entrada.formula
-    v = entrada.verdad
-
-    if f.tipo == "atom":
+    if tipo == "atom":
         return None
 
-    # Negacion
-    if f.tipo == "not":
-        return [[(f.izquierda, not v)]]
+    if tipo == "not":
+        return [[(a, not verdad)]]
 
-    # Conjuncion
-    if f.tipo == "and":
-        if v:
-            return [[
-                (f.izquierda, True),
-                (f.derecha, True)
-            ]]
+    if tipo == "and":
+        if verdad:
+            return [[(a, True), (b, True)]]
+        return [[(a, False)], [(b, False)]]
 
-        return [
-            [(f.izquierda, False)],
-            [(f.derecha, False)]
-        ]
+    if tipo == "or":
+        if verdad:
+            return [[(a, True)], [(b, True)]]
+        return [[(a, False), (b, False)]]
 
-    # Disyuncion
-    if f.tipo == "or":
-        if v:
+    if tipo == "implica":
+        if verdad:
+            return [[(a, False)], [(b, True)]]
+        return [[(a, True), (b, False)]]
+
+    if tipo == "bicond":
+        if verdad:
             return [
-                [(f.izquierda, True)],
-                [(f.derecha, True)]
-            ]
-
-        return [[
-            (f.izquierda, False),
-            (f.derecha, False)
-        ]]
-
-    # Implicacion
-    if f.tipo == "implica":
-        if v:
-            return [
-                [(f.izquierda, False)],
-                [(f.derecha, True)]
-            ]
-
-        return [[
-            (f.izquierda, True),
-            (f.derecha, False)
-        ]]
-
-    # Bicondicional
-    if f.tipo == "bicond":
-        if v:
-            return [
-                [
-                    (f.izquierda, True),
-                    (f.derecha, True)
-                ],
-                [
-                    (f.izquierda, False),
-                    (f.derecha, False)
-                ]
+                [(a, True), (b, True)],
+                [(a, False), (b, False)]
             ]
 
         return [
-            [
-                (f.izquierda, True),
-                (f.derecha, False)
-            ],
-            [
-                (f.izquierda, False),
-                (f.derecha, True)
-            ]
+            [(a, True), (b, False)],
+            [(a, False), (b, True)]
         ]
 
     return None
 
 
 def construir_arbol(formulas):
-    """Construye las ramas hasta que se cierran o quedan abiertas."""
+    """
+    Expande las ramas pendientes.
+    Prioriza las fórmulas que no generan nuevas ramas para optimizar el árbol.
+    Cierra las contradicciones en cuanto aparecen.
+    """
+    inicial = Rama()
 
-    ramas = [
-        Rama([Entrada(f, True) for f in formulas])
-    ]
+    for formula in formulas:
+        agregar(inicial, formula, True)
 
-    max_pasos = 300
+    ramas = [inicial]
+    max_pasos = 500
 
     for _ in range(max_pasos):
         cambio = False
-        nuevas_ramas = []
+        nuevas = []
 
         for rama in ramas:
 
             if rama.estado == "cerrada":
-                nuevas_ramas.append(rama)
+                nuevas.append(rama)
                 continue
 
-            cerrada, motivo = atomos_opuestos(rama)
+            cerrada, motivo = comprobar_contradiccion(rama)
 
             if cerrada:
                 rama.estado = "cerrada"
                 rama.motivo = motivo
-                nuevas_ramas.append(rama)
+                nuevas.append(rama)
                 continue
 
-            indice = next(
-                (
-                    i for i, e in enumerate(rama.entradas)
-                    if not e.aplicada and e.formula.tipo != "atom"
-                ),
-                None
-            )
+            # Buscar todas las fórmulas pendientes
+            pendientes = []
+            for elemento in rama.entradas:
+                formula, verdad = elemento
+                if formula.tipo == "atom":
+                    continue
+                if elemento not in rama.aplicadas:
+                    pendientes.append(elemento)
 
-            if indice is None:
+            if not pendientes:
                 rama.estado = "abierta"
-                nuevas_ramas.append(rama)
+                nuevas.append(rama)
                 continue
 
             cambio = True
+            
+            # --- LÓGICA DE PRIORIDAD ---
+            # Identificamos si una fórmula NO va a crear bifurcaciones
+            def es_ramificante(elem):
+                f, v = elem
+                if f.tipo == "not": return False
+                if f.tipo == "and" and v is True: return False
+                if f.tipo == "or" and v is False: return False
+                if f.tipo == "implica" and v is False: return False
+                return True
 
-            entrada = rama.entradas[indice]
-            entrada.aplicada = True
+            # Ordenamos para procesar primero las que no ramifican
+            pendientes.sort(key=es_ramificante)
+            pendiente = pendientes[0]
+            # ---------------------------
 
-            alternativas = expandir_entrada(entrada)
+            formula, verdad = pendiente
+            alternativas = expandir(formula, verdad)
 
-            if not alternativas:
-                nuevas_ramas.append(rama)
+            rama.aplicadas.add(pendiente)
+
+            if alternativas is None:
+                nuevas.append(rama)
                 continue
 
             for alternativa in alternativas:
-
                 nueva = Rama(
-                    entradas=[
-                        Entrada(e.formula, e.verdad, e.aplicada)
-                        for e in rama.entradas
-                    ]
+                    entradas=list(rama.entradas),
+                    aplicadas=set(rama.aplicadas)
                 )
 
-                for formula, valor in alternativa:
-                    nueva.entradas.append(
-                        Entrada(formula, valor)
-                    )
+                for f, v in alternativa:
+                    agregar(nueva, f, v)
 
-                cerrada, motivo = atomos_opuestos(nueva)
+                cerrada, motivo = comprobar_contradiccion(nueva)
 
                 if cerrada:
                     nueva.estado = "cerrada"
                     nueva.motivo = motivo
 
-                nuevas_ramas.append(nueva)
+                nuevas.append(nueva)
 
-        ramas = nuevas_ramas
+        ramas = nuevas
 
         if not cambio:
             break
@@ -443,165 +424,126 @@ def construir_arbol(formulas):
 
 
 # ============================================================
-# 3. DIBUJO DEL ARBOL SEMANTICO
+# 4. DIBUJAR EL ARBOL
 # ============================================================
 
-def dibujar_arbol(enlace_figura, contenedor, ramas):
-    """Dibuja el arbol directamente dentro de la ventana."""
-
+def dibujar_arbol(contenedor, ramas, simbolos):
     for widget in contenedor.winfo_children():
         widget.destroy()
 
-    cantidad = max(1, len(ramas))
+    cantidad = len(ramas)
+    ancho = max(10, cantidad * 2.4)
 
-    # Ajustar el ancho cuando hay muchas ramas
-    ancho = max(10, cantidad * 2.5)
-
-    fig = plt.Figure(figsize=(ancho, 7), dpi=100)
-    ax = fig.add_subplot(111)
-
+    figura = plt.Figure(figsize=(ancho, 7), dpi=100)
+    ax = figura.add_subplot(111)
     ax.axis("off")
     ax.set_title(
         "ARBOL SEMANTICO",
-        fontsize=16,
-        fontweight="bold",
-        pad=18
-    )
-
-    raiz_x = (cantidad - 1) / 2
-    raiz_y = 0
-
-    ax.text(
-        raiz_x,
-        raiz_y,
-        "PREMISAS",
-        ha="center",
-        va="center",
-        bbox=dict(
-            boxstyle="round,pad=0.5",
-            fc="#dceaf7",
-            ec="#355c7d",
-            lw=1.5
-        ),
-        fontsize=10,
+        fontsize=15,
         fontweight="bold"
     )
 
-    max_nivel = 1
+    centro = (cantidad - 1) / 2
 
-    for idx, rama in enumerate(ramas):
-        x = idx
+    ax.text(
+        centro, 0, "PREMISAS",
+        ha="center", va="center",
+        bbox=dict(boxstyle="round", fc="#dceaf7", ec="#355c7d")
+    )
 
-        # Evitar repetir exactamente la misma formula en la rama
-        entradas = []
+    profundidad = 1
+
+    for i, rama in enumerate(ramas):
+        x = i
+        previo_y = 0
+
+        # Evitar mostrar duplicados en la rama
         vistos = set()
+        elementos = []
 
-        for e in rama.entradas:
+        for formula, verdad in rama.entradas:
             texto = (
-                ("T " if e.verdad else "F ")
-                + imprimir_formula(e.formula)
+                ("T " if verdad else "F ")
+                + imprimir_formula(formula, simbolos)
             )
 
             if texto not in vistos:
                 vistos.add(texto)
-                entradas.append(texto)
+                elementos.append(texto)
 
-        previo_x = raiz_x
-        previo_y = raiz_y
-
-        for j, texto in enumerate(entradas):
-            nivel = j + 1
+        for nivel, texto in enumerate(elementos, start=1):
             y = -nivel
-            max_nivel = max(max_nivel, nivel + 1)
+            profundidad = max(profundidad, nivel + 2)
 
             ax.plot(
-                [previo_x, x],
+                [centro if nivel == 1 else x, x],
                 [previo_y - 0.12, y + 0.12],
                 color="#657786",
-                linewidth=1.2
+                linewidth=1
             )
 
             ax.text(
-                x,
-                y,
-                texto,
-                ha="center",
-                va="center",
+                x, y, texto,
+                ha="center", va="center",
+                fontsize=8,
                 bbox=dict(
-                    boxstyle="round,pad=0.35",
+                    boxstyle="round,pad=0.3",
                     fc="#f4f6f8",
                     ec="#8a969f"
-                ),
-                fontsize=8
+                )
             )
 
-            previo_x = x
             previo_y = y
 
-        y_final = -(len(entradas) + 1)
+        y_final = -(len(elementos) + 1)
 
         if rama.estado == "cerrada":
-            color = "#f8d7da"
-            borde = "#b02a37"
             etiqueta = "CERRADA X"
+            fondo = "#f8d7da"
+            borde = "#b02a37"
         else:
-            color = "#d4edda"
-            borde = "#198754"
             etiqueta = "ABIERTA"
+            fondo = "#d4edda"
+            borde = "#198754"
 
         ax.plot(
-            [previo_x, x],
+            [x, x],
             [previo_y - 0.12, y_final + 0.12],
             color=borde,
-            linewidth=1.5
+            linewidth=1.3
         )
 
         ax.text(
-            x,
-            y_final,
-            etiqueta,
-            ha="center",
-            va="center",
+            x, y_final, etiqueta,
+            ha="center", va="center",
+            fontsize=9, fontweight="bold",
             bbox=dict(
-                boxstyle="round,pad=0.45",
-                fc=color,
-                ec=borde,
-                lw=1.5
-            ),
-            fontsize=9,
-            fontweight="bold"
+                boxstyle="round,pad=0.4",
+                fc=fondo, ec=borde
+            )
         )
 
-        max_nivel = max(max_nivel, len(entradas) + 2)
-
     ax.set_xlim(-1, max(1, cantidad))
-    ax.set_ylim(-(max_nivel + 0.5), 0.8)
+    ax.set_ylim(-(profundidad + 0.5), 0.8)
+    figura.tight_layout()
 
-    fig.tight_layout()
-
-    canvas = FigureCanvasTkAgg(fig, master=contenedor)
+    canvas = FigureCanvasTkAgg(figura, master=contenedor)
     canvas.draw()
+    canvas.get_tk_widget().pack(fill="both", expand=True)
 
-    canvas.get_tk_widget().pack(
-        fill="both",
-        expand=True
-    )
-
-    enlace_figura["canvas"] = canvas
-    enlace_figura["figura"] = fig
+    return figura
 
 
 # ============================================================
-# 4. INTERFAZ GRAFICA
+# 5. ANALIZAR PREMISAS
 # ============================================================
 
 def analizar():
-    texto = entrada_premisas.get("1.0", tk.END).strip()
+    texto = entrada.get("1.0", tk.END).strip()
 
     if not texto:
         messagebox.showwarning(
-            "Faltan premisas",
-            "Escribe una premisa por linea."
+            "Aviso", "Escribe al menos una premisa."
         )
         return
 
@@ -613,175 +555,121 @@ def analizar():
 
     try:
         formulas = [parsear(linea) for linea in lineas]
-
     except Exception as error:
         messagebox.showerror(
-            "Error al interpretar",
-            f"No pude interpretar una premisa:\n{error}"
+            "Error de interpretacion",
+            str(error)
         )
         return
 
+    atomos = {}
+    for formula in formulas:
+        recoger_atomos(formula, atomos)
+
+    letras = "pqrstuvwxyzabcdefghijklmno"
+    simbolos = {
+        nombre: letras[i] if i < len(letras) else f"p{i+1}"
+        for i, nombre in enumerate(atomos)
+    }
+
     ramas = construir_arbol(formulas)
 
-    abiertas = sum(
-        rama.estado == "abierta"
-        for rama in ramas
-    )
-
-    cerradas = sum(
-        rama.estado == "cerrada"
-        for rama in ramas
-    )
+    abiertas = sum(r.estado == "abierta" for r in ramas)
+    cerradas = sum(r.estado == "cerrada" for r in ramas)
 
     salida.delete("1.0", tk.END)
 
-    salida.insert(
-        tk.END,
-        "PREMISAS INTERPRETADAS\n"
-    )
+    salida.insert(tk.END, "SIMBOLIZACION DE LAS PREMISAS\n")
+    salida.insert(tk.END, "-" * 38 + "\n")
 
     for i, formula in enumerate(formulas, start=1):
         salida.insert(
             tk.END,
-            f"{i}. {imprimir_formula(formula)}\n"
+            f"P{i}: {lineas[i-1]}\n"
+            f"    {imprimir_formula(formula, simbolos)}\n\n"
         )
 
-    salida.insert(
-        tk.END,
-        "\nRESULTADO DEL ARBOL SEMANTICO\n"
-    )
+    salida.insert(tk.END, "PROPOSICIONES ATOMICAS\n")
+    for nombre, original in atomos.items():
+        salida.insert(
+            tk.END,
+            f"{simbolos[nombre]} = {original}\n"
+        )
 
-    salida.insert(
-        tk.END,
-        f"Ramas abiertas: {abiertas}\n"
-    )
-
-    salida.insert(
-        tk.END,
-        f"Ramas cerradas: {cerradas}\n"
-    )
+    salida.insert(tk.END, "\nRESULTADO DEL TABLEAU\n")
+    salida.insert(tk.END, f"Ramas abiertas: {abiertas}\n")
+    salida.insert(tk.END, f"Ramas cerradas: {cerradas}\n")
 
     if abiertas:
         salida.insert(
             tk.END,
-            "Conclusion: las premisas son CONSISTENTES.\n"
-        )
-
-        salida.insert(
-            tk.END,
+            "\nCONCLUSION: PREMISAS CONSISTENTES.\n"
             "Existe al menos una rama abierta.\n"
         )
-
     else:
         salida.insert(
             tk.END,
-            "Conclusion: las premisas son INCONSISTENTES.\n"
+            "\nCONCLUSION: PREMISAS INCONSISTENTES.\n"
+            "Todas las ramas se cerraron.\n"
         )
 
-        salida.insert(
-            tk.END,
-            "Todas las ramas se cerraron por contradiccion.\n"
-        )
-
-    # Dibujar el arbol automaticamente en la misma ventana
-    dibujar_arbol(
-        figura_actual,
-        marco_arbol,
-        ramas
-    )
+    dibujar_arbol(marco_arbol, ramas, simbolos)
 
 
 # ============================================================
-# 5. CREAR VENTANA
+# 6. INTERFAZ GRAFICA
 # ============================================================
 
 ventana = tk.Tk()
-
 ventana.title("Logica I - Arbol semantico")
 ventana.geometry("1200x850")
-ventana.minsize(900, 650)
+ventana.minsize(850, 600)
 
-titulo = tk.Label(
+tk.Label(
     ventana,
     text="ARBOL SEMANTICO DE LOGICA PROPOSICIONAL",
-    font=("Arial", 16, "bold")
-)
+    font=("Arial", 15, "bold")
+).pack(pady=8)
 
-titulo.pack(pady=(10, 4))
-
-instrucciones = tk.Label(
+tk.Label(
     ventana,
     text=(
         "Escribe una premisa por linea. "
-        "Ejemplo: Si es de dia, entonces voy a trabajar"
+        "Usa conectores como y, o, no, implica, "
+        "si... entonces, si y solo si."
     ),
-    font=("Arial", 10)
+    wraplength=1000
+).pack()
+
+entrada = scrolledtext.ScrolledText(
+    ventana, height=5, font=("Arial", 11), wrap=tk.WORD
 )
+entrada.pack(fill="x", padx=12, pady=6)
 
-instrucciones.pack(pady=(0, 5))
-
-entrada_premisas = scrolledtext.ScrolledText(
-    ventana,
-    height=5,
-    font=("Arial", 11),
-    wrap=tk.WORD
-)
-
-entrada_premisas.pack(
-    fill="x",
-    padx=12,
-    pady=4
-)
-
-# Ejemplo inicial
-entrada_premisas.insert(
+entrada.insert(
     tk.END,
-    "Si es de dia, entonces voy a trabajar\n"
-    "Si llueve, entonces no voy a trabajar\n"
-    "Es de dia"
+    "Estudio o trabajo\n"
+    "No estudio"
 )
 
-boton = tk.Button(
+tk.Button(
     ventana,
     text="Analizar y mostrar arbol",
     command=analizar,
     font=("Arial", 11, "bold"),
     bg="#dceaf7",
-    padx=12,
-    pady=5
-)
-
-boton.pack(pady=6)
+    padx=12, pady=5
+).pack(pady=4)
 
 salida = scrolledtext.ScrolledText(
-    ventana,
-    height=7,
-    font=("Consolas", 10),
-    wrap=tk.WORD
+    ventana, height=10, font=("Consolas", 10), wrap=tk.WORD
 )
+salida.pack(fill="x", padx=12, pady=5)
 
-salida.pack(
-    fill="x",
-    padx=12,
-    pady=4
-)
-
-marco_arbol = tk.Frame(
-    ventana,
-    bd=1,
-    relief="sunken"
-)
-
+marco_arbol = tk.Frame(ventana, bd=1, relief="sunken")
 marco_arbol.pack(
-    fill="both",
-    expand=True,
-    padx=12,
-    pady=(4, 12)
+    fill="both", expand=True, padx=12, pady=(2, 10)
 )
 
-figura_actual = {}
-
-# Analizar el ejemplo automaticamente al abrir
 ventana.after(300, analizar)
-
 ventana.mainloop()
