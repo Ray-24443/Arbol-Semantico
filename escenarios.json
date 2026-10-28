@@ -1,3 +1,4 @@
 {
-    "Ejemplo#1": "Estudio o trabajo\nSi estudio, entonces apruebo o pido asesoria\nNo trabajo"
+    "Ejemplo#1": "Estudio o trabajo\nSi estudio, entonces apruebo o pido asesoria\nNo trabajo",
+    "Ejemplo#2": "si llueve entonces no voy al cine\nvoy al cine o voy al teatro\nsi voy al teatro entonces gasto dinero\nllueve y no gasto dinero"
 }
